@@ -416,148 +416,210 @@ async function callComate({ question, history, model, conversationId, images = [
     if (!cid) throw new Error(`建会话失败：${JSON.stringify(conv).slice(0, 200)}`)
   }
 
-  const taskId = (
-    await apiPost(license, "/api/aidevops/autocomate/rest/autowork/v2/task", {
-      agentInfo: wantTools
-        ? { agentName: "Agent", isProjectAgent: false, canInvokeAgents: true, isCustomAgent: false }
-        : { agentName: "Ask", isProjectAgent: false, canInvokeAgents: false, isCustomAgent: false },
-      agentId: wantTools ? 1 : 8,
-      conversationId: cid,
-      signal: {},
-      ...base,
-    })
-  )?.data?.taskId
-  if (!taskId) throw new Error("建任务失败：没拿到 taskId")
-
   const query = history ? `${history}\n\n用户：${question}` : question
-  const r = await fetch(BASE + "/api/aidevops/autocomate/rest/autowork/v2/execute", {
-    method: "POST",
-    headers: { ...API_HEADERS(license), Accept: "text/event-stream", "X-Trace-Id": randomUUID() },
-    body: JSON.stringify({
-      ...base,
-      taskId,
-      conversationId: cid,
-      agentId: wantTools ? 1 : 8,
-      uploadBaseInfo: {
-        os: "Windows 10",
-        osVersion: "Windows 10",
-        extName: "zulucli",
-        extVersion: "4.13.0",
-        ideType: "zulucli",
-        ideName: "zulucli",
-        ideVersion: "1.7.21",
-        vcsRepo: "",
-        vcsBranchName: "",
-        username: license,
-        license,
-        pluginVersion: "4.13.0",
-        device: randomUUID(),
-        triggerSource: "Agent",
-      },
-      query,
-      modelKey: model.modelId,
-      toolUseResults: toolResults,
-      contexts,
-      subAgents: [],
-      sysInfo: {
-        os: "Windows 10",
-        defaultShell: "cmd.exe",
-        homeDir: homedir(),
-        installedCommands: [],
-        notInstalledCommands: [],
-        workspacePath: process.cwd(),
-        workspaceRoots: [process.cwd()],
-      },
-      skillInfos: [],
-      hasMcp: false,
-      isUserQuery: true,
-      isMockQuery: false,
-      localIndex: false,
-      // 下面这几个字段看着没用，缺了模型会返回空内容——都是 zulu 真实请求里带的。
-      // systemReminder 尤其关键：原来照抄 zulu 的「Ask mode / read-only tools」，
-      // 模型会去发 FUNCTION_CALL（调 grep/read_file 之类），而这边不实现工具循环，
-      // 于是只收到一堆工具调用、拿不到最终文本 → 表现为「回复空白」。
-      // 所以这里显式声明「没有工具、只回文本」，把 agent 循环彻底掐掉。
-      agentVersion: 12,
-      isFirstQuery: !conversationId && !toolResults.length,
-      enableMemory: true,
-      systemReminder: wantTools
-        ? ""
-        : "<system-reminder>\nYou are a plain chat assistant. No tools are available in this session.\nDo NOT emit function calls. Answer with text only.\n</system-reminder>",
-      extendUserQueryInfo: { commands: [], skills: [], subagents: [], rules: [] },
-      extend: { isMultiWorkspace: false, useWorkflow: false },
-      sendMode: "normal",
-      agentInfo: wantTools
-        ? { agentName: "Agent", isProjectAgent: false, canInvokeAgents: true, isCustomAgent: false }
-        : { agentName: "Ask", isProjectAgent: false, canInvokeAgents: false, isCustomAgent: false },
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  })
-  if (!r.ok) throw new Error(`execute ${r.status} ${(await r.text()).slice(0, 160)}`)
 
-  const reader = r.body.getReader()
-  const dec = new TextDecoder()
-  let buf = ""
-  let text = ""
-  let err = ""
-  // FUNCTION_CALL 的事件是增量快照，按 tool_use.id 累积最后一个非空 input
-  const pending = new Map()
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += dec.decode(value, { stream: true })
-    const lines = buf.split("\n")
-    buf = lines.pop() ?? ""
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue
-      const raw = line.slice(6).trim()
-      if (!raw || raw === "[DONE]") continue
-      let j
-      try {
-        j = JSON.parse(raw)
-      } catch {
-        continue
-      }
-      const c = j.content
-      if (!c) continue
-      if (c.type === "EXCEPTION") err = c.detail?.exceptionMsg ?? c.text ?? "unknown"
-      if (c.type === "ANSWER") {
-        const d = c.detail?.delta ?? ""
-        if (d) {
-          text += d
-          onDelta?.(d)
+  // 一次执行：建任务 → execute → 收 SSE。needCompression 是「带压缩指令重发」用的，
+  // Comate 在上下文接近上限时不会自己压，而是回 NeedCompressionException 让客户端带
+  // needCompression=true 重来一次（官方 zulu 客户端的自动重试就是这么做的）。
+  const executeOnce = async (needCompression) => {
+    const taskId = (
+      await apiPost(license, "/api/aidevops/autocomate/rest/autowork/v2/task", {
+        agentInfo: wantTools
+          ? { agentName: "Agent", isProjectAgent: false, canInvokeAgents: true, isCustomAgent: false }
+          : { agentName: "Ask", isProjectAgent: false, canInvokeAgents: false, isCustomAgent: false },
+        agentId: wantTools ? 1 : 8,
+        conversationId: cid,
+        signal: {},
+        ...base,
+      })
+    )?.data?.taskId
+    if (!taskId) throw new Error("建任务失败：没拿到 taskId")
+
+    const r = await fetch(BASE + "/api/aidevops/autocomate/rest/autowork/v2/execute", {
+      method: "POST",
+      headers: { ...API_HEADERS(license), Accept: "text/event-stream", "X-Trace-Id": randomUUID() },
+      body: JSON.stringify({
+        ...base,
+        taskId,
+        conversationId: cid,
+        agentId: wantTools ? 1 : 8,
+        uploadBaseInfo: {
+          os: "Windows 10",
+          osVersion: "Windows 10",
+          extName: "zulucli",
+          extVersion: "4.13.0",
+          ideType: "zulucli",
+          ideName: "zulucli",
+          ideVersion: "1.7.21",
+          vcsRepo: "",
+          vcsBranchName: "",
+          username: license,
+          license,
+          pluginVersion: "4.13.0",
+          device: randomUUID(),
+          triggerSource: "Agent",
+        },
+        query,
+        modelKey: model.modelId,
+        toolUseResults: toolResults,
+        contexts,
+        subAgents: [],
+        sysInfo: {
+          os: "Windows 10",
+          defaultShell: "cmd.exe",
+          homeDir: homedir(),
+          installedCommands: [],
+          notInstalledCommands: [],
+          workspacePath: process.cwd(),
+          workspaceRoots: [process.cwd()],
+        },
+        skillInfos: [],
+        hasMcp: false,
+        isUserQuery: true,
+        isMockQuery: false,
+        localIndex: false,
+        // 下面这几个字段看着没用，缺了模型会返回空内容——都是 zulu 真实请求里带的。
+        // systemReminder 尤其关键：原来照抄 zulu 的「Ask mode / read-only tools」，
+        // 模型会去发 FUNCTION_CALL（调 grep/read_file 之类），而这边不实现工具循环，
+        // 于是只收到一堆工具调用、拿不到最终文本 → 表现为「回复空白」。
+        // 所以这里显式声明「没有工具、只回文本」，把 agent 循环彻底掐掉。
+        agentVersion: 12,
+        isFirstQuery: !conversationId && !toolResults.length,
+        enableMemory: true,
+        systemReminder: wantTools
+          ? ""
+          : "<system-reminder>\nYou are a plain chat assistant. No tools are available in this session.\nDo NOT emit function calls. Answer with text only.\n</system-reminder>",
+        extendUserQueryInfo: { commands: [], skills: [], subagents: [], rules: [] },
+        extend: { isMultiWorkspace: false, useWorkflow: false },
+        sendMode: "normal",
+        agentInfo: wantTools
+          ? { agentName: "Agent", isProjectAgent: false, canInvokeAgents: true, isCustomAgent: false }
+          : { agentName: "Ask", isProjectAgent: false, canInvokeAgents: false, isCustomAgent: false },
+        ...(needCompression ? { needCompression: true } : {}),
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!r.ok) {
+      const detail = (await r.text()).slice(0, 300)
+      const e = new Error(`execute ${r.status} ${detail}`)
+      e.compression = /NeedCompressionException/.test(detail)
+      throw e
+    }
+
+    const reader = r.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ""
+    let text = ""
+    let err = ""
+    let usage = null
+    // FUNCTION_CALL 的事件是增量快照，按 tool_use.id 累积最后一个非空 input
+    const pending = new Map()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split("\n")
+      buf = lines.pop() ?? ""
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue
+        const raw = line.slice(6).trim()
+        if (!raw || raw === "[DONE]") continue
+        let j
+        try {
+          j = JSON.parse(raw)
+        } catch {
+          continue
         }
-      }
-      if (String(c.type).startsWith("FUNCTION_CALL")) {
-        for (const tu of c.detail?.toolUse ?? []) {
-          if (!tu?.id) continue
-          const cur = pending.get(tu.id) ?? { name: tu.name ?? "", args: {} }
-          if (tu.name) cur.name = tu.name
-          if (tu.input && Object.keys(tu.input).length) {
-            // Comate 的参数是增量片段（如 "package" 然后 ".json"），空串是收尾标记。
-            // 所以字符串拼接、空串跳过，其余类型直接覆盖。
-            for (const [k, v] of Object.entries(tu.input)) {
-              if (typeof v === "string" && v === "") continue
-              if (typeof v === "string" && typeof cur.args[k] === "string" && cur.args[k]) cur.args[k] += v
-              else cur.args[k] = v
-            }
+        const c = j.content
+        if (!c) continue
+        // 服务端每轮都会回 TOKEN_USAGE（inputTokens/cachedInputTokens/outputTokens），
+        // 之前直接丢掉，导致网关侧 token 与缓存统计全是 0。
+        if (c.type === "TOKEN_USAGE") {
+          const u = c.detail?.usage
+          if (u) usage = { ...(usage ?? {}), ...u }
+          continue
+        }
+        if (c.type === "EXCEPTION") err = c.detail?.exceptionMsg ?? c.text ?? "unknown"
+        if (c.type === "ANSWER") {
+          const d = c.detail?.delta ?? ""
+          if (d) {
+            text += d
+            onDelta?.(d)
           }
-          pending.set(tu.id, cur)
+        }
+        if (String(c.type).startsWith("FUNCTION_CALL")) {
+          for (const tu of c.detail?.toolUse ?? []) {
+            if (!tu?.id) continue
+            const cur = pending.get(tu.id) ?? { name: tu.name ?? "", args: {} }
+            if (tu.name) cur.name = tu.name
+            if (tu.input && Object.keys(tu.input).length) {
+              // Comate 的参数是增量片段（如 "package" 然后 ".json"），空串是收尾标记。
+              // 所以字符串拼接、空串跳过，其余类型直接覆盖。
+              for (const [k, v] of Object.entries(tu.input)) {
+                if (typeof v === "string" && v === "") continue
+                if (typeof v === "string" && typeof cur.args[k] === "string" && cur.args[k]) cur.args[k] += v
+                else cur.args[k] = v
+              }
+            }
+            pending.set(tu.id, cur)
+          }
         }
       }
     }
+    // 只把 Hermes 认识的工具交出去：Comate 的 Skill / Glob 这类没有对应实现，
+    // 原样透传会让客户端报 "Model generated invalid tool call: Skill"。
+    const toolCalls = [...pending.entries()]
+      .map(([id, v]) => {
+        rememberToolCall(id, v.name, v.args) // Comate 原始 name/params，回传结果时要原样还回去
+        const mapped = TOOL_TO_OPENAI[v.name]
+        return mapped ? { id, name: mapped, arguments: v.args } : null
+      })
+      .filter(Boolean)
+    if (err && !text && !toolCalls.length) {
+      const e = new Error(err)
+      e.compression = /NeedCompressionException/.test(err)
+      throw e
+    }
+    return { text, toolCalls, usage }
   }
-  // 只把 Hermes 认识的工具交出去：Comate 的 Skill / Glob 这类没有对应实现，
-  // 原样透传会让客户端报 "Model generated invalid tool call: Skill"。
-  const toolCalls = [...pending.entries()]
-    .map(([id, v]) => {
-      rememberToolCall(id, v.name, v.args) // Comate 原始 name/params，回传结果时要原样还回去
-      const mapped = TOOL_TO_OPENAI[v.name]
-      return mapped ? { id, name: mapped, arguments: v.args } : null
-    })
-    .filter(Boolean)
-  if (err && !text && !toolCalls.length) throw new Error(err)
-  return { text, cid, toolCalls }
+
+  // 输入特别大时，先直接带 needCompression 发一次：服务端本来就要压，等它回
+  // NeedCompressionException 再重试等于白跑一轮（实测 802K/953K 的请求因此多花 15~20 秒）。
+  // 估算只用来决定「先问压缩」，估低了还有下面的异常重试兜底。
+  const estimateTokens = (s) => {
+    const text = String(s ?? "")
+    let cjk = 0
+    for (const ch of text) {
+      const c = ch.codePointAt(0)
+      if ((c >= 0x2e80 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0x3000 && c <= 0x303f)) cjk++
+    }
+    return Math.round(cjk * 0.63 + (text.length - cjk) * 0.3)
+  }
+  const compressUpfront = estimateTokens(query) >= 700000
+
+  let out
+  try {
+    out = await executeOnce(compressUpfront)
+  } catch (e) {
+    if (!e?.compression) throw e
+    if (compressUpfront) {
+      throw new Error(
+        "Comate 上下文已超出可压缩范围（NeedCompressionException）：这次输入太大，压缩后仍装不下，请缩短单条输入或另开会话",
+      )
+    }
+    // 官方 zulu 客户端的做法：带 needCompression=true 重发一次，让服务端先压缩历史再执行。
+    try {
+      out = await executeOnce(true)
+    } catch (e2) {
+      if (e2?.compression) {
+        throw new Error(
+          "Comate 上下文已超出可压缩范围（NeedCompressionException）：这次输入太大，压缩后仍装不下，请缩短单条输入或另开会话",
+        )
+      }
+      throw e2
+    }
+  }
+  return { text: out.text, cid, toolCalls: out.toolCalls, usage: out.usage }
 }
 
 // 把 OpenAI 的 messages 拼成 zulu 的单条 query。zulu 是 agent，不是多轮 chat API。
@@ -738,14 +800,31 @@ function rememberToolCall(id, name, params) {
 const TOOL_CALL_CID = new Map()
 
 
-const sseChunk = (id, model, delta, finish = null) =>
+const sseChunk = (id, model, delta, finish = null, usage = null) =>
   `data: ${JSON.stringify({
     id,
     object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [{ index: 0, delta, finish_reason: finish }],
+    ...(usage ? { usage } : {}),
   })}\n\n`
+
+// Comate 的 TOKEN_USAGE 是 { inputTokens, cachedInputTokens, outputTokens }，转成 OpenAI 的 usage。
+// 之前这个事件被直接丢掉，网关那边看到的 prompt/completion 就永远是 0。
+// OpenAI 的 prompt_tokens 含缓存命中部分，所以这里加起来，cached 单独放进 details。
+const toOpenAiUsage = (u) => {
+  const input = Number(u?.inputTokens ?? 0)
+  const cached = Number(u?.cachedInputTokens ?? 0)
+  const completion = Number(u?.outputTokens ?? 0)
+  const prompt = input + cached
+  return {
+    prompt_tokens: prompt,
+    completion_tokens: completion,
+    total_tokens: prompt + completion,
+    prompt_tokens_details: { cached_tokens: cached },
+  }
+}
 
 // loader.fetch：magpie 把 OpenAI 格式请求交进来
 async function handleChat(init) {
@@ -816,9 +895,9 @@ async function handleChat(init) {
                 }),
               )
             })
-            push(sseChunk(id, model.id, {}, "tool_calls"))
+            push(sseChunk(id, model.id, {}, "tool_calls", toOpenAiUsage(out.usage)))
           } else {
-            push(sseChunk(id, model.id, {}, "stop"))
+            push(sseChunk(id, model.id, {}, "stop", toOpenAiUsage(out.usage)))
           }
           push("data: [DONE]\n\n")
         } catch (e) {
@@ -861,7 +940,7 @@ async function handleChat(init) {
         created: Math.floor(Date.now() / 1000),
         model: model.id,
         choices: [{ index: 0, message, finish_reason: out.toolCalls.length ? "tool_calls" : "stop" }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        usage: toOpenAiUsage(out.usage),
       }),
       { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
     )
