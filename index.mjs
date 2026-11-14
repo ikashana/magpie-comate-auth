@@ -265,22 +265,28 @@ const pluginIcon = await loadIcon()
 
 // modelId 是 Comate 服务端认的完整 key（<type>_<hash>），从 `zulu list-model` 取一次，
 // 会随服务端版本变；对不上时用 modelType 前缀兜底，再不行就报错让用户重跑 list-model。
+//
+// context 是 Comate 服务端回的真实上下文上限（每次响应的 usage 里带 contextLimit），
+// 2026-11 实测值见 README「上下文窗口（实测）」。此前这里对 15 个模型一律写 128000，
+// 把 200K~1.024M 的模型全低估成 128K，网关卡在「128K + 8K 输出预留」上，
+// 长会话里会把这些模型从候选里剔掉（表现为「不参与：这个请求超出它 128K 的上下文窗口」）。
+// 新增模型时务必先测一次，不要沿用默认值。
 const MODELS = [
-  { id: "deepseek-v4-flash", modelId: "deepseek-v4-flash_a8668ea86c3d40e7ad1f8ee45715d447", label: "Deepseek V4 Flash", vision: false },
-  { id: "deepseek-v4-pro", modelId: "deepseek-v4-pro_4ba5277b630243be9eeb19fe48f853fa", label: "Deepseek V4 Pro", vision: false },
-  { id: "deepseek-v4.1-flash", modelId: "deepseek-v4.1-flash_4827e158760447029e6594bb2b1ab066", label: "Deepseek V4.1 Flash", vision: true, effort: ["low", "high", "max"] },
-  { id: "ernie-5.5-flash-preview", modelId: "ernie-5.5-flash-preview_996d9d76bb7c45ecbff286216aaeeab2", label: "ERNIE 5.5 Flash Preview", vision: true },
-  { id: "glm-4.7-fc", modelId: "glm-4.7-fc_0b87452a03394418b5c8d5468deff6c7", label: "GLM-4.7", vision: false },
-  { id: "glm-5-turbo-fc", modelId: "glm-5-turbo-fc_6748c832242b4bcb8f715c7c7902d1ad", label: "GLM-5-Turbo", vision: false },
-  { id: "glm-5.1", modelId: "glm-5.1_a231cc317baf4eaaa0b5afdd4de5f1d9", label: "GLM-5.1", vision: false },
-  { id: "glm-5.2", modelId: "glm-5.2_50c584482e9d47edbbe47938a88b56b1", label: "GLM-5.2", vision: false },
-  { id: "glm-5.3", modelId: "glm-5.3_37c550fc6d5b4fb2825abc2c1c88a6b3", label: "GLM-5.3", vision: false, effort: ["low", "high", "max"] },
-  { id: "glm-5.3-flash", modelId: "glm-5.3-flash_805131a9381a4940ba0f2d90cad0e7eb", label: "GLM-5.3-Flash", vision: true },
-  { id: "glm-5v-turbo", modelId: "glm-5v-turbo_ea9e4f222f0a40b281953ebcb6981dda", label: "GLM-5v-Turbo", vision: true },
-  { id: "kimi-k2.6-oneapi", modelId: "kimi-k2.6-oneapi_123e4567e89b12d3a456426614174000", label: "Kimi-K2.6", vision: true },
-  { id: "minimax-m2.5-fc", modelId: "minimax-m2.5-fc_c99ea14f526548a8bc28717d4e854123", label: "MiniMax M2.5", vision: false },
-  { id: "minimax-m3", modelId: "minimax-m3_a8f465fbedb942efadace88370ad7ff1", label: "MiniMax M3", vision: true },
-  { id: "minimax-m2.7-fc", modelId: "minimax-m2.7-fc_047f123f661c414bb253c05b605c391e", label: "MiniMax-M2.7", vision: false },
+  { id: "deepseek-v4-flash", modelId: "deepseek-v4-flash_a8668ea86c3d40e7ad1f8ee45715d447", label: "Deepseek V4 Flash", vision: false, context: 1024000 },
+  { id: "deepseek-v4-pro", modelId: "deepseek-v4-pro_4ba5277b630243be9eeb19fe48f853fa", label: "Deepseek V4 Pro", vision: false, context: 1024000 },
+  { id: "deepseek-v4.1-flash", modelId: "deepseek-v4.1-flash_4827e158760447029e6594bb2b1ab066", label: "Deepseek V4.1 Flash", vision: true, effort: ["low", "high", "max"], context: 1000000 },
+  { id: "ernie-5.5-flash-preview", modelId: "ernie-5.5-flash-preview_996d9d76bb7c45ecbff286216aaeeab2", label: "ERNIE 5.5 Flash Preview", vision: true, context: 1000000 },
+  { id: "glm-4.7-fc", modelId: "glm-4.7-fc_0b87452a03394418b5c8d5468deff6c7", label: "GLM-4.7", vision: false, context: 200000 },
+  { id: "glm-5-turbo-fc", modelId: "glm-5-turbo-fc_6748c832242b4bcb8f715c7c7902d1ad", label: "GLM-5-Turbo", vision: false, context: 200000 },
+  { id: "glm-5.1", modelId: "glm-5.1_a231cc317baf4eaaa0b5afdd4de5f1d9", label: "GLM-5.1", vision: false, context: 256000 },
+  { id: "glm-5.2", modelId: "glm-5.2_50c584482e9d47edbbe47938a88b56b1", label: "GLM-5.2", vision: false, context: 1000000 },
+  { id: "glm-5.3", modelId: "glm-5.3_37c550fc6d5b4fb2825abc2c1c88a6b3", label: "GLM-5.3", vision: false, effort: ["low", "high", "max"], context: 1000000 },
+  { id: "glm-5.3-flash", modelId: "glm-5.3-flash_805131a9381a4940ba0f2d90cad0e7eb", label: "GLM-5.3-Flash", vision: true, context: 1000000 },
+  { id: "glm-5v-turbo", modelId: "glm-5v-turbo_ea9e4f222f0a40b281953ebcb6981dda", label: "GLM-5v-Turbo", vision: true, context: 200000 },
+  { id: "kimi-k2.6-oneapi", modelId: "kimi-k2.6-oneapi_123e4567e89b12d3a456426614174000", label: "Kimi-K2.6", vision: true, context: 256000 },
+  { id: "minimax-m2.5-fc", modelId: "minimax-m2.5-fc_c99ea14f526548a8bc28717d4e854123", label: "MiniMax M2.5", vision: false, context: 200000 },
+  { id: "minimax-m3", modelId: "minimax-m3_a8f465fbedb942efadace88370ad7ff1", label: "MiniMax M3", vision: true, context: 512000 },
+  { id: "minimax-m2.7-fc", modelId: "minimax-m2.7-fc_047f123f661c414bb253c05b605c391e", label: "MiniMax-M2.7", vision: false, context: 200000 },
 ]
 
 const modelOf = (name) => MODELS.find((m) => m.id === name || m.label === name) ?? MODELS[0]
@@ -293,7 +299,9 @@ function modelEntry(m) {
       name: m.label,
       // api.id 是发给上游的 model id（Comate 认的 <type>_<hash>），和展示用的 id 不同
       api: { id: m.modelId, npm: "@ai-sdk/openai-compatible" },
-      limit: { context: 128000, output: 8192 },
+      // context 用上表实测值；没有测过的模型退回 128K（宁可低估，也不要让网关把
+      // 装不下的请求塞给上游）。output 服务端不回传，沿用 8192。
+      limit: { context: m.context ?? 128000, output: m.output ?? 8192 },
       capabilities: {
         reasoning: true,
         toolcall: true,
