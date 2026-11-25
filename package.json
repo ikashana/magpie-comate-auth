@@ -1,7 +1,7 @@
 {
   "name": "magpie-comate-auth",
   "version": "0.1.0",
-  "description": "文心快码 Baidu Comate account card for magpie: membership, seat points, add-on and gift points",
+  "description": "文心快码 Comate for magpie: account card plus models via auth.loader.fetch",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
@@ -27,8 +27,5 @@
   "bugs": {
     "url": "https://github.com/ikashana/magpie-comate-auth/issues"
   },
-  "license": "MIT",
-  "dependencies": {
-    "@comate/zulu": "1.7.21"
-  }
+  "license": "MIT"
 }
